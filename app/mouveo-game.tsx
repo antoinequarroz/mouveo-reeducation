@@ -17,6 +17,7 @@ type WorldId = "garden" | "space" | "ocean";
 type SessionMode = "single" | "circuit";
 type Mechanic = "pop" | "trail" | "hold" | "rhythm" | "goalie" | "memory" | "mirror" | "platform";
 type Point = { x: number; y: number };
+type LiveQuality = { amplitude: number; stability: "stable" | "adjust" | "waiting"; tempo: "doux" | "régulier" | "rapide" | "attente" };
 type InstallPromptEvent = Event & { prompt: () => Promise<void>; userChoice: Promise<{ outcome: "accepted" | "dismissed" }> };
 type SessionRecord = { id: number; date: string; exercise: ExerciseId; arm: Arm; hits: number; points: number; regularity: number; control?: number; timing?: number; painBefore?: number; pain: number; fatigue: number; mode?: SessionMode };
 
@@ -44,9 +45,17 @@ const WORLDS: Record<WorldId, { name: string; emoji: string; description: string
   ocean: { name: "Océan", emoji: "🌊", description: "Jambes et équilibre" },
 };
 
-const ARIANE_READY_TEXT = "Bonjour, je suis Ariane. Je vous accompagne pendant votre séance.";
-const ARIANE_CUES: Record<string, string> = {
-  [ARIANE_READY_TEXT]: "ready",
+const COACH_READY_TEXT = "Bonjour, je suis Christophe. Je vous accompagne pendant votre séance.";
+const ARM_START_TEXT = "C’est parti. Gardez l’épaule relâchée et accompagnez la cible sans forcer.";
+const LEGS_START_TEXT = "C’est parti. Gardez le buste droit et reposez le pied doucement.";
+const BALANCE_START_TEXT = "C’est parti. Fixez un point devant vous et gardez une chaise stable à proximité.";
+const SQUAT_START_TEXT = "C’est parti. Descendez lentement, puis redressez-vous sans à-coup.";
+const TRUNK_COACH_TEXT = "Ralentissez. Gardez le buste stable et réduisez l’amplitude si nécessaire.";
+const SYMMETRY_COACH_TEXT = "Alignez doucement les deux mains à la même hauteur.";
+const SLOW_RETURN_TEXT = "Très bien. Ralentissez maintenant le retour.";
+const GOOD_CONTROL_TEXT = "Excellent contrôle. Gardez ce mouvement doux et régulier.";
+const COACH_CUES: Record<string, string> = {
+  [COACH_READY_TEXT]: "ready",
   "Placez-vous au centre du cadre.": "position",
   "Calibration terminée. Trois.": "calibrated",
   "Trois.": "three",
@@ -56,14 +65,29 @@ const ARIANE_CUES: Record<string, string> = {
   "Mission terminée. Prenez une pause avant le jeu suivant.": "mission_complete",
   "Séance en pause. Respirez tranquillement.": "paused",
   "Reprenez doucement.": "resume",
+  [ARM_START_TEXT]: "arm_start",
+  [LEGS_START_TEXT]: "legs_start",
+  [BALANCE_START_TEXT]: "balance_start",
+  [SQUAT_START_TEXT]: "squat_start",
+  [TRUNK_COACH_TEXT]: "trunk",
+  [SYMMETRY_COACH_TEXT]: "symmetry",
+  [SLOW_RETURN_TEXT]: "slow_return",
+  [GOOD_CONTROL_TEXT]: "good_control",
 };
 
-function arianeCue(text: string) {
-  if (ARIANE_CUES[text]) return ARIANE_CUES[text];
+function coachCue(text: string) {
+  if (COACH_CUES[text]) return COACH_CUES[text];
   if (/^Série de/.test(text)) return "good";
   if (/^Jeu/.test(text) && /Replacez-vous/.test(text)) return "reposition";
   if (/^Jeu/.test(text)) return "next_game";
   return null;
+}
+
+function exerciseStartText(id: ExerciseId) {
+  if (id === "squat") return SQUAT_START_TEXT;
+  if (id === "balance" || id === "hold") return BALANCE_START_TEXT;
+  if (["knee", "march", "step"].includes(id)) return LEGS_START_TEXT;
+  return ARM_START_TEXT;
 }
 
 function regularityScore(times: number[]) {
@@ -111,6 +135,9 @@ export default function MouveoGame() {
   const programPlanRef = useRef<ExerciseId[]>(DEFAULT_CIRCUIT);
   const visibleRef = useRef(true);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const coachRef = useRef({ cue: "", time: 0 });
+  const feedbackUpdateRef = useRef(0);
+  const motionRef = useRef<{ point: Point; time: number } | null>(null);
 
   const [view, setView] = useState<View>("patient");
   const [stage, setStage] = useState<Stage>("welcome");
@@ -125,7 +152,7 @@ export default function MouveoGame() {
   const [goal, setGoal] = useState(8);
   const [seated, setSeated] = useState(false);
   const [voice, setVoice] = useState(true);
-  const voiceProfile = "Ariane · Chatterbox open source";
+  const voiceProfile = "Christophe · Chatterbox open source";
   const settingsRef = useRef({ exercise, arm, amplitude, goal, seated, voice, sessionMode });
   settingsRef.current = { exercise, arm, amplitude, goal, seated: seated && !STANDING_ONLY.has(exercise), voice, sessionMode };
   stageRef.current = stage;
@@ -150,6 +177,7 @@ export default function MouveoGame() {
   const [history, setHistory] = useState<SessionRecord[]>(DEFAULT_HISTORY);
   const [installPrompt, setInstallPrompt] = useState<InstallPromptEvent | null>(null);
   const [online, setOnline] = useState(true);
+  const [liveQuality, setLiveQuality] = useState<LiveQuality>({ amplitude: 0, stability: "waiting", tempo: "attente" });
   programPlanRef.current = programPlan;
 
   const bestScore = useMemo(() => Math.max(0, ...history.map((item) => item.points)), [history]);
@@ -176,13 +204,22 @@ export default function MouveoGame() {
       window.speechSynthesis.speak(utterance);
     };
 
-    const cue = arianeCue(text);
+    const cue = coachCue(text);
     if (!cue) { fallbackSpeech(); return; }
-    const audio = new Audio(`/voice/ariane/${cue}.mp3`);
+    const audio = new Audio(`/voice/christophe/${cue}.mp3`);
     audio.preload = "auto";
     audioRef.current = audio;
     void audio.play().catch(fallbackSpeech);
   }, []);
+
+  const coach = useCallback((text: string) => {
+    const cue = coachCue(text) ?? text;
+    const now = Date.now();
+    if (coachRef.current.cue === cue && now - coachRef.current.time < 12000) return;
+    if (now - coachRef.current.time < 6500) return;
+    coachRef.current = { cue, time: now };
+    speak(text);
+  }, [speak]);
 
   const stopCamera = useCallback(() => {
     if (frameRef.current) cancelAnimationFrame(frameRef.current);
@@ -190,6 +227,9 @@ export default function MouveoGame() {
     streamRef.current = null;
     landmarkerRef.current?.close();
     landmarkerRef.current = null;
+    audioRef.current?.pause();
+    audioRef.current = null;
+    if (typeof window !== "undefined" && "speechSynthesis" in window) window.speechSynthesis.cancel();
   }, []);
 
   useEffect(() => () => stopCamera(), [stopCamera]);
@@ -233,7 +273,7 @@ export default function MouveoGame() {
   useEffect(() => {
     if (stage !== "countdown") return;
     const timer = window.setTimeout(() => {
-      if (countdown <= 1) { setStage("playing"); setStatus("C’est parti — mouvement lent et confortable"); speak("C’est parti."); }
+      if (countdown <= 1) { setStage("playing"); setStatus("C’est parti — mouvement lent et confortable"); coachRef.current = { cue: "start", time: Date.now() }; speak(exerciseStartText(settingsRef.current.exercise)); }
       else { setCountdown((value) => value - 1); speak(String(countdown - 1)); }
     }, 750);
     return () => window.clearTimeout(timer);
@@ -267,6 +307,8 @@ export default function MouveoGame() {
       const nextLevel = returnScore >= 95 ? Math.min(3, adaptiveLevelRef.current + 1) : returnScore < 70 ? Math.max(1, adaptiveLevelRef.current - 1) : adaptiveLevelRef.current;
       adaptiveLevelRef.current = nextLevel; setAdaptiveLevel(nextLevel);
       returnStartedRef.current = 0;
+      if (returnScore < 70) coach(SLOW_RETURN_TEXT);
+      else if (returnScore >= 95 && comboRef.current > 0 && comboRef.current % 4 === 0) coach(GOOD_CONTROL_TEXT);
     }
     phaseRef.current = "reach";
     setPhase("reach");
@@ -276,7 +318,7 @@ export default function MouveoGame() {
       const nextSide = settingsRef.current.arm === "left" ? "right" : "left";
       setArm(nextSide); setStatus(`Changez de jambe — côté ${nextSide === "left" ? "gauche" : "droit"}`);
     } else setStatus(returnScore < 70 ? "Ralentissez le retour — la cible se rapproche" : "Nouvelle cible — mouvement lent et confortable");
-  }, []);
+  }, [coach]);
 
   const recordHit = useCallback(() => {
     const now = Date.now();
@@ -392,7 +434,11 @@ export default function MouveoGame() {
       }
     }
 
-    if (visibleRef.current !== isVisible) { visibleRef.current = isVisible; setBodyVisible(isVisible); }
+    if (visibleRef.current !== isVisible) {
+      visibleRef.current = isVisible;
+      setBodyVisible(isVisible);
+      if (!isVisible) setLiveQuality({ amplitude: 0, stability: "waiting", tempo: "attente" });
+    }
     if (stageRef.current === "calibrate") {
       if (isVisible) {
         if (!calibrationRef.current) calibrationRef.current = Date.now();
@@ -458,12 +504,27 @@ export default function MouveoGame() {
     if (phaseRef.current === "return") { ctx.fillStyle = "#07111f"; ctx.font = "700 16px system-ui"; ctx.textAlign = "center"; ctx.fillText("↙", target.x, target.y + 6); }
 
     if (!tracked || !isVisible || stageRef.current !== "playing") return;
+    const feedbackNow = Date.now();
+    if (feedbackNow - feedbackUpdateRef.current > 350) {
+      feedbackUpdateRef.current = feedbackNow;
+      const previousMotion = motionRef.current;
+      const elapsed = previousMotion ? Math.max(1, feedbackNow - previousMotion.time) : 0;
+      const normalizedSpeed = previousMotion ? Math.hypot(tracked.x - previousMotion.point.x, tracked.y - previousMotion.point.y) / Math.max(1, limbLength) / (elapsed / 1000) : 0;
+      motionRef.current = { point: tracked, time: feedbackNow };
+      const travelled = Math.hypot(tracked.x - neutral.x, tracked.y - neutral.y);
+      const expected = Math.max(1, Math.hypot(reachTarget.x - neutral.x, reachTarget.y - neutral.y));
+      setLiveQuality({
+        amplitude: Math.max(0, Math.min(110, Math.round(travelled / expected * 100))),
+        stability: trunkStable && symmetryGood ? "stable" : "adjust",
+        tempo: normalizedSpeed > 1.35 ? "rapide" : normalizedSpeed > .18 ? "régulier" : "doux",
+      });
+    }
     for (const marker of trackedPair.length ? trackedPair : [tracked]) { ctx.beginPath(); ctx.arc(marker.x, marker.y, 11, 0, Math.PI * 2); ctx.fillStyle = "#fff"; ctx.fill(); }
     if (!trunkStable) {
       if (Date.now() - lastCompensationRef.current > 1500) { lastCompensationRef.current = Date.now(); const easier = Math.max(1, adaptiveLevelRef.current - 1); adaptiveLevelRef.current = easier; setAdaptiveLevel(easier); }
-      setStatus("Ralentissez et gardez le buste stable — difficulté réduite"); return;
+      setStatus("Ralentissez et gardez le buste stable — difficulté réduite"); coach(TRUNK_COACH_TEXT); return;
     }
-    if (!symmetryGood) { setStatus("Alignez doucement les deux mains à la même hauteur"); return; }
+    if (!symmetryGood) { setStatus("Alignez doucement les deux mains à la même hauteur"); coach(SYMMETRY_COACH_TEXT); return; }
     const distance = Math.hypot(tracked.x - target.x, tracked.y - target.y);
     if (distance < Math.max(48, limbLength * .16)) {
       if (phaseRef.current === "return") completeReturn();
@@ -474,7 +535,7 @@ export default function MouveoGame() {
         if (dwell >= 1) { dwellRef.current = 0; recordHit(); }
       } else recordHit();
     } else if (phaseRef.current === "reach") dwellRef.current = 0;
-  }, [completeReturn, demo, project, recordHit, speak]);
+  }, [coach, completeReturn, demo, project, recordHit, speak]);
 
   const loop = useCallback(() => {
     const video = videoRef.current;
@@ -488,11 +549,11 @@ export default function MouveoGame() {
   }, [drawScene]);
 
   const prepareSession = () => {
-    stopCamera(); anchorRef.current = []; setHits(0); setSessionHits(0); setPoints(0); setCombo(0); comboRef.current = 0; setAdaptiveLevel(1); adaptiveLevelRef.current = 1; lastCompensationRef.current = 0; setCountdown(3); setSeconds(sessionMode === "circuit" ? 60 * programPlan.length : 60); setSaved(false); setPain(painBefore); setFatigue(2); setCalibration(0); calibrationRef.current = 0; targetIndexRef.current = 0; hitTimesRef.current = []; controlledReturnsRef.current = []; timingScoresRef.current = []; returnStartedRef.current = 0; circuitIndexRef.current = 0; setCircuitIndex(0); phaseRef.current = "reach"; setPhase("reach"); setBodyVisible(true); visibleRef.current = true;
+    stopCamera(); anchorRef.current = []; setHits(0); setSessionHits(0); setPoints(0); setCombo(0); comboRef.current = 0; setAdaptiveLevel(1); adaptiveLevelRef.current = 1; lastCompensationRef.current = 0; coachRef.current = { cue: "", time: 0 }; feedbackUpdateRef.current = 0; motionRef.current = null; setLiveQuality({ amplitude: 0, stability: "waiting", tempo: "attente" }); setCountdown(3); setSeconds(sessionMode === "circuit" ? 60 * programPlan.length : 60); setSaved(false); setPain(painBefore); setFatigue(2); setCalibration(0); calibrationRef.current = 0; targetIndexRef.current = 0; hitTimesRef.current = []; controlledReturnsRef.current = []; timingScoresRef.current = []; returnStartedRef.current = 0; circuitIndexRef.current = 0; setCircuitIndex(0); phaseRef.current = "reach"; setPhase("reach"); setBodyVisible(true); visibleRef.current = true;
   };
 
   const openCameraSetup = () => {
-    prepareSession(); setDemo(false); setCameraError(""); setStage("setup"); setStatus("Préparez votre espace"); speak(ARIANE_READY_TEXT);
+    prepareSession(); setDemo(false); setCameraError(""); setStage("setup"); setStatus("Préparez votre espace"); speak(COACH_READY_TEXT);
   };
 
   const startCamera = async () => {
@@ -564,7 +625,7 @@ export default function MouveoGame() {
 
   return (
     <main className="min-h-dvh bg-[#07111f] text-white">
-      <Header onHistory={() => setView("history")} onTherapist={() => { setSessionMode("single"); setView("therapist"); }} voice={voice} voiceProfile={voiceProfile} onVoice={() => setVoice((v) => !v)} onTestVoice={() => speak(ARIANE_READY_TEXT)} online={online} canInstall={Boolean(installPrompt)} onInstall={installApp} />
+      <Header onHistory={() => setView("history")} onTherapist={() => { setSessionMode("single"); setView("therapist"); }} voice={voice} voiceProfile={voiceProfile} onVoice={() => setVoice((v) => !v)} onTestVoice={() => speak(COACH_READY_TEXT)} online={online} canInstall={Boolean(installPrompt)} onInstall={installApp} />
       <section className="mx-auto grid max-w-7xl gap-4 px-4 pb-6 sm:px-8 lg:grid-cols-[minmax(0,1fr)_340px]">
         <div className="camera-shell relative min-h-[64dvh] overflow-hidden rounded-[2rem] border border-white/10 bg-[#0d1b2d] shadow-2xl">
           <video ref={videoRef} muted playsInline className={`absolute inset-0 h-full w-full scale-x-[-1] object-cover transition-opacity ${stage === "welcome" || stage === "setup" || stage === "finished" ? "opacity-0" : "opacity-100"}`} />
@@ -585,6 +646,7 @@ export default function MouveoGame() {
         </div>
         <aside className="flex flex-col gap-4">
           <SessionJourney stage={stage} sessionMode={sessionMode} programPlan={programPlan} exercise={exercise} circuitIndex={circuitIndex} />
+          {stage === "playing" && <MovementQualityCard quality={liveQuality} demo={demo} />}
           <SessionCard exercise={exercise} arm={arm} setArm={setArm} amplitude={amplitude} setAmplitude={setAmplitude} goal={goal} hits={hits} points={points} combo={combo} adaptiveLevel={adaptiveLevel} sessionMode={sessionMode} circuitIndex={circuitIndex} circuitTotal={programPlan.length} />
           <Garden level={gardenLevel} points={lifetimePoints} sessions={history.length} history={history} />
           <WeeklyGoal history={history} />
@@ -597,7 +659,7 @@ export default function MouveoGame() {
 }
 
 function Header({ onHistory, onTherapist, voice, voiceProfile, onVoice, onTestVoice, online, canInstall, onInstall }: { onHistory: () => void; onTherapist: () => void; voice: boolean; voiceProfile: string; onVoice: () => void; onTestVoice: () => void; online: boolean; canInstall: boolean; onInstall: () => void }) {
-  return <header className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-4 sm:px-8"><div className="flex items-center gap-3"><span className="grid size-10 place-items-center rounded-2xl bg-[#c4ff4a] text-[#07111f]"><Activity /></span><div><p className="text-lg font-black tracking-tight">MOUVÉO</p><p className="flex items-center gap-1.5 text-xs text-slate-400"><span className={`size-1.5 rounded-full ${online ? "bg-emerald-300" : "bg-amber-300"}`} />{online ? "Prêt" : "Mode hors ligne"}</p></div></div><nav className="flex items-center gap-1">{canInstall && <Button variant="outline" onClick={onInstall} className="hidden border-[#c4ff4a]/30 bg-[#c4ff4a]/10 text-[#c4ff4a] hover:bg-[#c4ff4a]/20 hover:text-[#c4ff4a] sm:inline-flex"><Sparkles /> Installer</Button>}<Button aria-label={voice ? `Désactiver ${voiceProfile}` : `Activer ${voiceProfile}`} title={voiceProfile} variant="ghost" onClick={onVoice} className="text-slate-300 hover:bg-white/10 hover:text-white">{voice ? <Volume2 /> : <VolumeX />}<span className="hidden text-xs font-bold md:inline">Ariane</span></Button><Button aria-label="Tester la voix Ariane" title="Tester Ariane" variant="ghost" onClick={onTestVoice} disabled={!voice} className="text-[#c4ff4a] hover:bg-[#c4ff4a]/10 hover:text-[#d5ff7d]"><Sparkles /><span className="hidden text-xs font-bold lg:inline">Tester</span></Button><Button variant="ghost" onClick={onHistory} className="text-slate-300 hover:bg-white/10 hover:text-white"><History /> <span className="hidden sm:inline">Historique</span></Button><Button variant="ghost" onClick={onTherapist} className="text-slate-300 hover:bg-white/10 hover:text-white"><Settings2 /> <span className="hidden sm:inline">Thérapeute</span></Button></nav></header>;
+  return <header className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-4 sm:px-8"><div className="flex items-center gap-3"><span className="grid size-10 place-items-center rounded-2xl bg-[#c4ff4a] text-[#07111f]"><Activity /></span><div><p className="text-lg font-black tracking-tight">MOUVÉO</p><p className="flex items-center gap-1.5 text-xs text-slate-400"><span className={`size-1.5 rounded-full ${online ? "bg-emerald-300" : "bg-amber-300"}`} />{online ? "Prêt" : "Mode hors ligne"}</p></div></div><nav className="flex items-center gap-1">{canInstall && <Button variant="outline" onClick={onInstall} className="hidden border-[#c4ff4a]/30 bg-[#c4ff4a]/10 text-[#c4ff4a] hover:bg-[#c4ff4a]/20 hover:text-[#c4ff4a] sm:inline-flex"><Sparkles /> Installer</Button>}<Button aria-label={voice ? `Désactiver ${voiceProfile}` : `Activer ${voiceProfile}`} title={voiceProfile} variant="ghost" onClick={onVoice} className="text-slate-300 hover:bg-white/10 hover:text-white">{voice ? <Volume2 /> : <VolumeX />}<span className="hidden text-xs font-bold md:inline">Christophe</span></Button><Button aria-label="Tester la voix Christophe" title="Tester Christophe" variant="ghost" onClick={onTestVoice} disabled={!voice} className="text-[#c4ff4a] hover:bg-[#c4ff4a]/10 hover:text-[#d5ff7d]"><Sparkles /><span className="hidden text-xs font-bold lg:inline">Tester</span></Button><Button variant="ghost" onClick={onHistory} className="text-slate-300 hover:bg-white/10 hover:text-white"><History /> <span className="hidden sm:inline">Historique</span></Button><Button variant="ghost" onClick={onTherapist} className="text-slate-300 hover:bg-white/10 hover:text-white"><Settings2 /> <span className="hidden sm:inline">Thérapeute</span></Button></nav></header>;
 }
 
 function Welcome({ exercise, setExercise, sessionMode, setSessionMode, programPlan, world, setWorld, painBefore, setPainBefore, cameraError, onCamera, onDemo }: { exercise: ExerciseId; setExercise: (id: ExerciseId) => void; sessionMode: SessionMode; setSessionMode: (mode: SessionMode) => void; programPlan: ExerciseId[]; world: WorldId; setWorld: (world: WorldId) => void; painBefore: number; setPainBefore: (value: number) => void; cameraError: string; onCamera: () => void; onDemo: () => void }) {
@@ -655,6 +717,13 @@ function SessionJourney({ stage, sessionMode, programPlan, exercise, circuitInde
   const plan = sessionMode === "circuit" ? programPlan : [exercise];
   if (stage === "welcome") return null;
   return <div className="rounded-[1.4rem] border border-white/10 bg-white/[.045] p-4"><div className="flex items-center justify-between"><p className="text-sm font-black uppercase tracking-[.12em] text-slate-300">Votre parcours</p><span className="text-xs text-slate-500">{stage === "finished" ? "Terminé" : stage === "setup" ? "Préparation" : `Étape ${circuitIndex + 1}/${plan.length}`}</span></div><div className="mt-4 flex items-center gap-1" aria-label="Progression de la séance"><span className={`grid size-8 shrink-0 place-items-center rounded-full ${stage !== "setup" ? "bg-emerald-300 text-[#07111f]" : "bg-[#c4ff4a] text-[#07111f]"}`}><Smartphone className="size-4" /></span>{plan.map((id, index) => { const complete = index < circuitIndex || stage === "finished"; const current = activeSession && index === circuitIndex; return <div key={id} className="contents"><span className={`h-1 flex-1 rounded-full ${complete || current ? "bg-[#c4ff4a]" : "bg-white/10"}`} /><span title={EXERCISES[id].name} className={`grid size-8 shrink-0 place-items-center rounded-full text-xs font-black ${complete ? "bg-emerald-300 text-[#07111f]" : current ? "bg-[#c4ff4a] text-[#07111f] ring-4 ring-[#c4ff4a]/15" : "bg-white/10 text-slate-500"}`}>{complete ? <Check className="size-4" /> : index + 1}</span></div>; })}<span className={`h-1 flex-1 rounded-full ${stage === "finished" ? "bg-[#c4ff4a]" : "bg-white/10"}`} /><span className={`grid size-8 shrink-0 place-items-center rounded-full ${stage === "finished" ? "bg-amber-300 text-[#07111f]" : "bg-white/10 text-slate-500"}`}><Trophy className="size-4" /></span></div></div>;
+}
+
+function MovementQualityCard({ quality, demo }: { quality: LiveQuality; demo: boolean }) {
+  const shown: LiveQuality = demo ? { amplitude: 100, stability: "stable", tempo: "régulier" } : quality;
+  const waiting = shown.stability === "waiting";
+  const stabilityLabel = waiting ? "En attente" : shown.stability === "stable" ? "Stable" : "À ajuster";
+  return <div className="rounded-[1.6rem] border border-sky-300/20 bg-[linear-gradient(145deg,rgba(56,189,248,.10),rgba(196,255,74,.05))] p-5"><div className="flex items-start justify-between gap-3"><div><p className="flex items-center gap-2 font-black text-sky-100"><Volume2 className="size-4 text-[#c4ff4a]" /> Coach Christophe</p><p className="mt-1 text-xs leading-relaxed text-slate-400">Repères en direct pour rendre le geste plus doux.</p></div><span className={`rounded-full px-3 py-1 text-xs font-bold ${waiting ? "bg-white/10 text-slate-400" : shown.stability === "stable" ? "bg-emerald-300/15 text-emerald-200" : "bg-amber-300/15 text-amber-200"}`}>{stabilityLabel}</span></div><div className="mt-4"><div className="flex items-end justify-between"><span className="text-sm text-slate-300">Amplitude vers la cible</span><strong className="text-xl tabular-nums text-white">{waiting ? "—" : `${Math.min(100, shown.amplitude)}%`}</strong></div><Progress value={waiting ? 0 : Math.min(100, shown.amplitude)} className="mt-2 h-2 bg-white/10 [&_[data-slot=progress-indicator]]:bg-gradient-to-r [&_[data-slot=progress-indicator]]:from-sky-300 [&_[data-slot=progress-indicator]]:to-[#c4ff4a]" /></div><div className="mt-4 grid grid-cols-2 gap-2"><div className="rounded-xl bg-black/15 p-3"><p className="text-xs text-slate-500">Buste / symétrie</p><p className={`mt-1 font-black ${shown.stability === "adjust" ? "text-amber-200" : "text-emerald-200"}`}>{stabilityLabel}</p></div><div className="rounded-xl bg-black/15 p-3"><p className="text-xs text-slate-500">Vitesse observée</p><p className={`mt-1 font-black capitalize ${shown.tempo === "rapide" ? "text-amber-200" : "text-sky-200"}`}>{shown.tempo}</p></div></div><p className="mt-3 text-xs leading-relaxed text-slate-500">Indicateurs ludiques approximatifs, sans valeur de mesure clinique.</p></div>;
 }
 
 function SessionCard({ exercise, arm, setArm, amplitude, setAmplitude, goal, hits, points, combo, adaptiveLevel, sessionMode, circuitIndex, circuitTotal }: { exercise: ExerciseId; arm: Arm; setArm: (v: Arm) => void; amplitude: number; setAmplitude: (v: number) => void; goal: number; hits: number; points: number; combo: number; adaptiveLevel: number; sessionMode: SessionMode; circuitIndex: number; circuitTotal: number }) {
