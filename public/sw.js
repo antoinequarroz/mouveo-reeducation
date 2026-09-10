@@ -1,4 +1,4 @@
-const CACHE = "mouveo-v10";
+const CACHE = "mouveo-v11";
 const CORE = [
   "/", "/manifest.webmanifest", "/favicon.svg",
   "/voice/christophe/ready.mp3", "/voice/christophe/position.mp3", "/voice/christophe/calibrated.mp3",
