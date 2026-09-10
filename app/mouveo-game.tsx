@@ -7,7 +7,7 @@ import { Activity, BarChart3, Camera, Check, ChevronLeft, Flower2, History, Paus
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 
-type Stage = "welcome" | "loading" | "calibrate" | "playing" | "rest" | "finished";
+type Stage = "welcome" | "loading" | "calibrate" | "playing" | "paused" | "rest" | "finished";
 type View = "patient" | "history" | "therapist";
 type Arm = "left" | "right";
 type ExerciseId = "lateral" | "frontal" | "path" | "hold" | "goalie" | "memory" | "knee" | "march" | "step" | "squat" | "balance";
@@ -18,7 +18,7 @@ type SessionMode = "single" | "circuit";
 type Mechanic = "pop" | "trail" | "hold" | "rhythm" | "goalie" | "memory" | "platform";
 type Point = { x: number; y: number };
 type InstallPromptEvent = Event & { prompt: () => Promise<void>; userChoice: Promise<{ outcome: "accepted" | "dismissed" }> };
-type SessionRecord = { id: number; date: string; exercise: ExerciseId; arm: Arm; hits: number; points: number; regularity: number; control?: number; painBefore?: number; pain: number; fatigue: number; mode?: SessionMode };
+type SessionRecord = { id: number; date: string; exercise: ExerciseId; arm: Arm; hits: number; points: number; regularity: number; control?: number; timing?: number; painBefore?: number; pain: number; fatigue: number; mode?: SessionMode };
 
 const EXERCISES: Record<ExerciseId, { name: string; short: string; instruction: string; color: string; mode: BodyMode; mechanic: Mechanic; world: WorldId; holdMs?: number; family: "haut du corps" | "jambes" | "équilibre" }> = {
   lateral: { name: "Bulles du jardin", short: "Élévation latérale", instruction: "Éclatez les bulles sur le côté, puis revenez doucement.", color: "#c4ff4a", mode: "arm", mechanic: "pop", world: "garden", family: "haut du corps" },
@@ -81,6 +81,9 @@ export default function MouveoGame() {
   const hitTimesRef = useRef<number[]>([]);
   const returnStartedRef = useRef(0);
   const controlledReturnsRef = useRef<number[]>([]);
+  const timingScoresRef = useRef<number[]>([]);
+  const adaptiveLevelRef = useRef(1);
+  const lastCompensationRef = useRef(0);
   const circuitIndexRef = useRef(0);
   const programPlanRef = useRef<ExerciseId[]>(DEFAULT_CIRCUIT);
   const visibleRef = useRef(true);
@@ -107,6 +110,7 @@ export default function MouveoGame() {
   const [sessionHits, setSessionHits] = useState(0);
   const [points, setPoints] = useState(0);
   const [combo, setCombo] = useState(0);
+  const [adaptiveLevel, setAdaptiveLevel] = useState(1);
   const [seconds, setSeconds] = useState(60);
   const [bodyVisible, setBodyVisible] = useState(true);
   const [calibration, setCalibration] = useState(0);
@@ -127,8 +131,8 @@ export default function MouveoGame() {
   const gardenLevel = Math.min(4, Math.floor(lifetimePoints / 150));
   const regularity = regularityScore(hitTimesRef.current);
   const control = controlledReturnsRef.current.length ? Math.round(controlledReturnsRef.current.reduce((sum, value) => sum + value, 0) / controlledReturnsRef.current.length) : 0;
+  const timing = timingScoresRef.current.length ? Math.round(timingScoresRef.current.reduce((sum, value) => sum + value, 0) / timingScoresRef.current.length) : 0;
   const sessionGoal = goal * (sessionMode === "circuit" ? programPlan.length : 1);
-  const adaptiveLevel = Math.min(3, Math.floor(combo / 3) + 1);
 
   const speak = useCallback((text: string) => {
     if (!settingsRef.current.voice || !("speechSynthesis" in window)) return;
@@ -205,17 +209,23 @@ export default function MouveoGame() {
   }, []);
 
   const completeReturn = useCallback(() => {
+    let returnScore = 78;
     if (returnStartedRef.current) {
       const duration = Date.now() - returnStartedRef.current;
-      const score = duration >= 700 && duration <= 4000 ? 100 : duration < 500 ? 55 : 78;
-      controlledReturnsRef.current.push(score);
+      returnScore = duration >= 700 && duration <= 4000 ? 100 : duration < 500 ? 55 : 78;
+      controlledReturnsRef.current.push(returnScore);
+      const nextLevel = returnScore >= 95 ? Math.min(3, adaptiveLevelRef.current + 1) : returnScore < 70 ? Math.max(1, adaptiveLevelRef.current - 1) : adaptiveLevelRef.current;
+      adaptiveLevelRef.current = nextLevel; setAdaptiveLevel(nextLevel);
       returnStartedRef.current = 0;
     }
     phaseRef.current = "reach";
     setPhase("reach");
     targetIndexRef.current += 1;
     dwellRef.current = 0;
-    setStatus("Nouvelle cible — mouvement lent et confortable");
+    if (settingsRef.current.exercise === "march") {
+      const nextSide = settingsRef.current.arm === "left" ? "right" : "left";
+      setArm(nextSide); setStatus(`Changez de jambe — côté ${nextSide === "left" ? "gauche" : "droit"}`);
+    } else setStatus(returnScore < 70 ? "Ralentissez le retour — la cible se rapproche" : "Nouvelle cible — mouvement lent et confortable");
   }, []);
 
   const recordHit = useCallback(() => {
@@ -226,7 +236,11 @@ export default function MouveoGame() {
     returnStartedRef.current = now;
     const nextCombo = comboRef.current + 1;
     comboRef.current = nextCombo;
-    const bonus = Math.floor(nextCombo / 3) * 5;
+    const mechanic = EXERCISES[settingsRef.current.exercise].mechanic;
+    const beatPosition = (now % 1800) / 1800;
+    const timingScore = Math.max(35, Math.round(100 - Math.abs(beatPosition - .88) * 120));
+    if (mechanic === "rhythm") timingScoresRef.current.push(timingScore);
+    const bonus = Math.floor(nextCombo / 3) * 5 + (mechanic === "rhythm" && timingScore >= 85 ? 5 : 0);
     setSessionHits((value) => value + 1);
     setHits((value) => {
       const next = value + 1;
@@ -247,7 +261,7 @@ export default function MouveoGame() {
     phaseRef.current = "return";
     setPhase("return");
     const mode = EXERCISES[settingsRef.current.exercise].mode;
-    setStatus(mode === "arm" ? "Cible atteinte — revenez près de la hanche" : mode === "knee" ? "Genou levé — reposez le pied doucement" : mode === "ankle" ? "Cible atteinte — revenez au centre" : "Descente validée — redressez-vous doucement");
+    setStatus(mechanic === "rhythm" && timingScore >= 85 ? "Tempo parfait — revenez doucement" : mode === "arm" ? "Cible atteinte — revenez près de la hanche" : mode === "knee" ? "Genou levé — reposez le pied doucement" : mode === "ankle" ? "Cible atteinte — revenez au centre" : "Descente validée — redressez-vous doucement");
     const milestones = [Math.ceil(settingsRef.current.goal * .4), Math.ceil(settingsRef.current.goal * .7), settingsRef.current.goal];
     if (milestones.includes(nextCombo)) celebrate(nextCombo === milestones[0] ? "Série lancée !" : nextCombo === milestones[1] ? "Très régulier !" : "Mission accomplie !");
     speak(nextCombo % 3 === 0 ? `Série de ${nextCombo}. Revenez doucement.` : "Bien. Revenez doucement.");
@@ -353,19 +367,20 @@ export default function MouveoGame() {
     };
     const offset = patterns[cfg.exercise][step];
     const applySide = mode === "hips" ? 0 : side;
-    const adaptiveReach = Math.min(1.04, 1 + Math.floor(comboRef.current / 4) * .015);
+    const adaptiveReach = 1 + (adaptiveLevelRef.current - 1) * .02;
     const reachTarget = { x: origin.x + applySide * limbLength * offset.x * strength * adaptiveReach, y: origin.y + limbLength * offset.y * strength * adaptiveReach };
     const returnTarget = neutral;
     const target = phaseRef.current === "reach" ? reachTarget : returnTarget;
     const color = phaseRef.current === "reach" ? EXERCISES[cfg.exercise].color : "#7dd3fc";
     const pulse = 1 + Math.sin(Date.now() / 180) * .08;
-    const targetRadius = Math.max(21, 29 - Math.floor(comboRef.current / 3) * 1.5);
+    const targetRadius = 31 - (adaptiveLevelRef.current - 1) * 4;
     const mechanic = EXERCISES[cfg.exercise].mechanic;
     if (mechanic === "trail" || mechanic === "memory") {
       ctx.beginPath(); ctx.moveTo(origin.x, origin.y); ctx.lineTo(target.x, target.y); ctx.setLineDash([7, 12]); ctx.strokeStyle = `${color}88`; ctx.lineWidth = 4; ctx.stroke(); ctx.setLineDash([]);
     }
     if (mechanic === "rhythm") {
-      ctx.beginPath(); ctx.arc(target.x, target.y, 58 + Math.sin(Date.now() / 230) * 16, 0, Math.PI * 2); ctx.strokeStyle = `${color}99`; ctx.lineWidth = 5; ctx.stroke();
+      const beat = (Date.now() % 1800) / 1800;
+      ctx.beginPath(); ctx.arc(target.x, target.y, 76 - beat * 48, 0, Math.PI * 2); ctx.strokeStyle = `${color}bb`; ctx.lineWidth = 5; ctx.stroke();
     }
     ctx.beginPath();
     if (mechanic === "platform") ctx.roundRect(target.x - 48, target.y - 19, 96, 38, 16);
@@ -378,7 +393,10 @@ export default function MouveoGame() {
 
     if (!tracked || !isVisible || stageRef.current !== "playing") return;
     ctx.beginPath(); ctx.arc(tracked.x, tracked.y, 11, 0, Math.PI * 2); ctx.fillStyle = "#fff"; ctx.fill();
-    if (!trunkStable) { setStatus("Ralentissez et gardez le buste stable"); return; }
+    if (!trunkStable) {
+      if (Date.now() - lastCompensationRef.current > 1500) { lastCompensationRef.current = Date.now(); const easier = Math.max(1, adaptiveLevelRef.current - 1); adaptiveLevelRef.current = easier; setAdaptiveLevel(easier); }
+      setStatus("Ralentissez et gardez le buste stable — difficulté réduite"); return;
+    }
     const distance = Math.hypot(tracked.x - target.x, tracked.y - target.y);
     if (distance < Math.max(48, limbLength * .16)) {
       if (phaseRef.current === "return") completeReturn();
@@ -403,7 +421,7 @@ export default function MouveoGame() {
   }, [drawScene]);
 
   const prepareSession = () => {
-    stopCamera(); anchorRef.current = []; setHits(0); setSessionHits(0); setPoints(0); setCombo(0); comboRef.current = 0; setSeconds(sessionMode === "circuit" ? 60 * programPlan.length : 60); setSaved(false); setPain(painBefore); setFatigue(2); setCalibration(0); calibrationRef.current = 0; targetIndexRef.current = 0; hitTimesRef.current = []; controlledReturnsRef.current = []; returnStartedRef.current = 0; circuitIndexRef.current = 0; setCircuitIndex(0); phaseRef.current = "reach"; setPhase("reach"); setBodyVisible(true); visibleRef.current = true;
+    stopCamera(); anchorRef.current = []; setHits(0); setSessionHits(0); setPoints(0); setCombo(0); comboRef.current = 0; setAdaptiveLevel(1); adaptiveLevelRef.current = 1; lastCompensationRef.current = 0; setSeconds(sessionMode === "circuit" ? 60 * programPlan.length : 60); setSaved(false); setPain(painBefore); setFatigue(2); setCalibration(0); calibrationRef.current = 0; targetIndexRef.current = 0; hitTimesRef.current = []; controlledReturnsRef.current = []; timingScoresRef.current = []; returnStartedRef.current = 0; circuitIndexRef.current = 0; setCircuitIndex(0); phaseRef.current = "reach"; setPhase("reach"); setBodyVisible(true); visibleRef.current = true;
   };
 
   const startCamera = async () => {
@@ -429,6 +447,8 @@ export default function MouveoGame() {
     requestAnimationFrame(function animate() { drawScene(); frameRef.current = requestAnimationFrame(animate); });
   };
 
+  const pauseSession = () => { setStage("paused"); speak("Séance en pause. Respirez tranquillement."); };
+  const resumeSession = () => { lastHitRef.current = Date.now(); setStatus("Reprise douce — rejoignez la cible"); setStage("playing"); speak("Reprenez doucement."); };
   const reset = () => { prepareSession(); setDemo(false); setStage("welcome"); setStatus("Choisissez votre mission"); };
   const demoHit = () => { if (!demo || stage !== "playing") return; if (phaseRef.current === "reach") recordHit(); else completeReturn(); };
 
@@ -440,7 +460,7 @@ export default function MouveoGame() {
 
   const saveSummary = () => {
     if (saved) return;
-    const record: SessionRecord = { id: Date.now(), date: new Date().toISOString(), exercise, arm, hits: sessionHits, points, regularity, control, painBefore, pain, fatigue, mode: sessionMode };
+    const record: SessionRecord = { id: Date.now(), date: new Date().toISOString(), exercise, arm, hits: sessionHits, points, regularity, control, timing, painBefore, pain, fatigue, mode: sessionMode };
     const next = [record, ...history].slice(0, 30);
     setHistory(next); window.localStorage.setItem("mouveo-history", JSON.stringify(next)); setSaved(true); celebrate("Séance enregistrée !");
   };
@@ -472,10 +492,12 @@ export default function MouveoGame() {
           {stage === "loading" && <CenteredStatus icon={<Activity className="size-10 animate-pulse text-[#c4ff4a]" />} title={status} detail="La première ouverture peut prendre quelques secondes." />}
           {stage === "calibrate" && <div className="absolute inset-0 grid place-items-end bg-[#07111f]/25 p-6"><div className="w-full rounded-3xl bg-[#07111f]/90 p-5 text-center backdrop-blur"><p className="text-xl font-bold">{bodyVisible ? "Ne bougez plus, calibration…" : status}</p><Progress value={calibration} className="mx-auto mt-4 h-3 max-w-md bg-white/10 [&_[data-slot=progress-indicator]]:bg-[#c4ff4a]" /><p className="mt-2 text-sm text-slate-300">{calibration}% · aucune mesure clinique</p></div></div>}
           {stage === "playing" && <GameHud points={points} combo={combo} seconds={seconds} status={status} visible={bodyVisible || demo} phase={phase} />}
+          {stage === "paused" && <PausedScreen onResume={resumeSession} onStop={reset} />}
           {stage === "rest" && <RestScreen completed={circuitIndex + 1} total={programPlan.length} nextExercise={programPlan[circuitIndex + 1]} onContinue={continueCircuit} onStop={() => { stopCamera(); setStage("finished"); }} />}
           {celebration && <Celebration text={celebration} />}
-          {stage === "finished" && <Summary hits={sessionHits} goal={sessionGoal} points={points} regularity={regularity} control={control} painBefore={painBefore} pain={pain} setPain={setPain} fatigue={fatigue} setFatigue={setFatigue} saved={saved} onSave={saveSummary} onReset={reset} />}
-          {stage !== "welcome" && stage !== "finished" && stage !== "rest" && <button aria-label="Arrêter immédiatement la séance" onClick={reset} className="absolute right-4 top-24 z-40 rounded-full border border-red-200/30 bg-red-500/85 px-4 py-2 text-sm font-black text-white shadow-lg backdrop-blur hover:bg-red-500"><Pause className="mr-1 inline size-4" /> Arrêter</button>}
+          {stage === "finished" && <Summary hits={sessionHits} goal={sessionGoal} points={points} regularity={regularity} control={control} timing={timing} painBefore={painBefore} pain={pain} setPain={setPain} fatigue={fatigue} setFatigue={setFatigue} saved={saved} onSave={saveSummary} onReset={reset} />}
+          {stage === "playing" && <div className="absolute right-4 top-24 z-40 flex gap-2"><button aria-label="Mettre la séance en pause" onClick={pauseSession} className="rounded-full border border-white/20 bg-[#07111f]/80 px-4 py-2 text-sm font-black text-white shadow-lg backdrop-blur"><Pause className="mr-1 inline size-4" /> Pause</button><button aria-label="Arrêter immédiatement la séance" onClick={reset} className="rounded-full border border-red-200/30 bg-red-500/85 px-4 py-2 text-sm font-black text-white shadow-lg backdrop-blur hover:bg-red-500">Arrêter</button></div>}
+          {(stage === "loading" || stage === "calibrate") && <button aria-label="Arrêter immédiatement la séance" onClick={reset} className="absolute right-4 top-4 z-40 rounded-full border border-red-200/30 bg-red-500/85 px-4 py-2 text-sm font-black text-white shadow-lg backdrop-blur">Arrêter</button>}
         </div>
         <aside className="flex flex-col gap-4">
           <SessionCard exercise={exercise} arm={arm} setArm={setArm} amplitude={amplitude} setAmplitude={setAmplitude} goal={goal} hits={hits} points={points} combo={combo} adaptiveLevel={adaptiveLevel} sessionMode={sessionMode} circuitIndex={circuitIndex} circuitTotal={programPlan.length} />
@@ -499,19 +521,24 @@ function Welcome({ exercise, setExercise, sessionMode, setSessionMode, programPl
 
 function CenteredStatus({ icon, title, detail }: { icon: React.ReactNode; title: string; detail: string }) { return <div className="absolute inset-0 grid place-items-center bg-[#07111f]/88 p-6"><div className="text-center">{<span className="mx-auto mb-4 block w-fit">{icon}</span>}<p className="font-semibold">{title}</p><p className="mt-2 text-sm text-slate-400">{detail}</p></div></div>; }
 
+function PausedScreen({ onResume, onStop }: { onResume: () => void; onStop: () => void }) {
+  return <div className="absolute inset-0 z-30 grid place-items-center bg-[#07111f]/90 p-6 backdrop-blur"><div className="max-w-sm text-center"><span className="mx-auto grid size-16 place-items-center rounded-full bg-white/10"><Pause className="size-8 text-sky-200" /></span><p className="mt-5 text-sm font-bold uppercase tracking-[.18em] text-sky-300">Séance en pause</p><h2 className="mt-2 text-4xl font-black">Prenez votre temps.</h2><p className="mt-3 text-slate-300">Votre progression est conservée et le chronomètre est arrêté.</p><div className="mt-6 flex flex-col gap-3 sm:flex-row sm:justify-center"><Button size="lg" onClick={onResume} className="h-12 rounded-xl bg-[#c4ff4a] font-bold text-[#07111f] hover:bg-[#d5ff7d]"><Play /> Reprendre</Button><Button size="lg" variant="outline" onClick={onStop} className="h-12 rounded-xl border-red-200/20 bg-red-400/10 text-red-100 hover:bg-red-400/20 hover:text-white">Arrêter</Button></div></div></div>;
+}
+
 function RestScreen({ completed, total, nextExercise, onContinue, onStop }: { completed: number; total: number; nextExercise: ExerciseId; onContinue: () => void; onStop: () => void }) {
   return <div className="absolute inset-0 z-30 grid place-items-center bg-[#07111f]/92 p-6 backdrop-blur"><div className="max-w-md text-center"><span className="mx-auto grid size-16 place-items-center rounded-full bg-sky-300/15 text-3xl">💧</span><p className="mt-5 text-sm font-bold uppercase tracking-[.18em] text-sky-300">Pause récupération · {completed}/{total}</p><h2 className="mt-2 text-4xl font-black">Respirez tranquillement.</h2><p className="mt-3 text-slate-300">Prochaine mission : <strong className="text-white">{EXERCISES[nextExercise].name}</strong></p><div className="mt-6 flex flex-col gap-3 sm:flex-row sm:justify-center"><Button size="lg" onClick={onContinue} className="h-12 rounded-xl bg-[#c4ff4a] font-bold text-[#07111f] hover:bg-[#d5ff7d]"><Play /> Je suis prêt</Button><Button size="lg" variant="outline" onClick={onStop} className="h-12 rounded-xl border-white/15 bg-white/5 text-white hover:bg-white/10 hover:text-white">Terminer ici</Button></div></div></div>;
 }
 
 function GameHud({ points, combo, seconds, status, visible, phase }: { points: number; combo: number; seconds: number; status: string; visible: boolean; phase: Phase }) {
-  return <><div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between bg-gradient-to-b from-black/75 to-transparent p-5 pb-20"><div className="flex gap-3"><div><p className="text-sm text-white/70">Score</p><p className="text-4xl font-black tabular-nums">{points}</p></div>{combo >= 3 && <div className="mt-1 h-fit rounded-full border border-amber-300/30 bg-amber-300/15 px-3 py-1 text-sm font-black text-amber-200"><Zap className="mr-1 inline size-4 fill-current" /> ×{combo}</div>}</div><div className="rounded-2xl bg-black/35 px-5 py-3 text-center backdrop-blur"><p className="text-xs text-white/70">Temps actif</p><p className="text-2xl font-black tabular-nums">0:{String(seconds).padStart(2,"0")}</p></div></div><div className="pointer-events-none absolute inset-x-0 bottom-5 flex justify-center px-4"><div className={`rounded-full px-5 py-3 text-center text-sm font-bold shadow-xl backdrop-blur ${visible ? "bg-[#07111f]/80 text-white" : "bg-amber-300 text-[#07111f]"}`}>{visible ? <>{phase === "reach" ? <Play className="mr-2 inline size-4" /> : <RotateCcw className="mr-2 inline size-4" />}{status}</> : <><Pause className="mr-2 inline size-4" />Repositionnez-vous — séance en pause</>}</div></div></>;
+  const clock = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+  return <><div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between bg-gradient-to-b from-black/75 to-transparent p-5 pb-20"><div className="flex gap-3"><div><p className="text-sm text-white/70">Score</p><p className="text-4xl font-black tabular-nums">{points}</p></div>{combo >= 3 && <div className="mt-1 h-fit rounded-full border border-amber-300/30 bg-amber-300/15 px-3 py-1 text-sm font-black text-amber-200"><Zap className="mr-1 inline size-4 fill-current" /> ×{combo}</div>}</div><div className="rounded-2xl bg-black/35 px-5 py-3 text-center backdrop-blur"><p className="text-xs text-white/70">Temps actif</p><p className="text-2xl font-black tabular-nums">{clock}</p></div></div><div className="pointer-events-none absolute inset-x-0 bottom-5 flex justify-center px-4"><div className={`rounded-full px-5 py-3 text-center text-sm font-bold shadow-xl backdrop-blur ${visible ? "bg-[#07111f]/80 text-white" : "bg-amber-300 text-[#07111f]"}`}>{visible ? <>{phase === "reach" ? <Play className="mr-2 inline size-4" /> : <RotateCcw className="mr-2 inline size-4" />}{status}</> : <><Pause className="mr-2 inline size-4" />Repositionnez-vous — séance en pause</>}</div></div></>;
 }
 
 function Celebration({ text }: { text: string }) { return <div className="pointer-events-none absolute inset-0 z-30 grid place-items-center overflow-hidden" aria-live="polite"><div className="reward-pop rounded-3xl border border-[#c4ff4a]/40 bg-[#07111f]/90 px-7 py-5 text-center shadow-[0_0_60px_rgba(196,255,74,.28)] backdrop-blur"><Star className="mx-auto mb-2 size-9 fill-[#c4ff4a] text-[#c4ff4a]" /><p className="text-2xl font-black">{text}</p></div>{Array.from({ length: 12 }).map((_, index) => <span key={index} className="spark" style={{ "--i": index } as CSSProperties} />)}</div>; }
 
-function Summary({ hits, goal, points, regularity, control, painBefore, pain, setPain, fatigue, setFatigue, saved, onSave, onReset }: { hits: number; goal: number; points: number; regularity: number; control: number; painBefore: number; pain: number; setPain: (v: number) => void; fatigue: number; setFatigue: (v: number) => void; saved: boolean; onSave: () => void; onReset: () => void }) {
+function Summary({ hits, goal, points, regularity, control, timing, painBefore, pain, setPain, fatigue, setFatigue, saved, onSave, onReset }: { hits: number; goal: number; points: number; regularity: number; control: number; timing: number; painBefore: number; pain: number; setPain: (v: number) => void; fatigue: number; setFatigue: (v: number) => void; saved: boolean; onSave: () => void; onReset: () => void }) {
   const stars = hits >= goal ? 3 : hits >= goal * .65 ? 2 : hits >= goal * .35 ? 1 : 0;
-  const feedback = pain - painBefore >= 2 ? "Votre douleur a augmenté : privilégiez le repos et signalez-le à votre professionnel." : control >= 85 ? "Vos retours sont bien contrôlés. Gardez cette lenteur confortable." : regularity >= 80 ? "Votre rythme est régulier. Pensez maintenant à ralentir le retour." : "Chaque mouvement compte. Cherchez surtout un geste lent et confortable.";
+  const feedback = pain - painBefore >= 2 ? "Votre douleur a augmenté : privilégiez le repos et signalez-le à votre professionnel." : timing >= 85 ? "Votre synchronisation est excellente. Gardez ce rythme sans accélérer le geste." : control >= 85 ? "Vos retours sont bien contrôlés. Gardez cette lenteur confortable." : regularity >= 80 ? "Votre rythme est régulier. Pensez maintenant à ralentir le retour." : "Chaque mouvement compte. Cherchez surtout un geste lent et confortable.";
   return <div className="absolute inset-0 overflow-y-auto bg-[#0b1a2b] p-6"><div className="mx-auto max-w-xl text-center"><span className="mx-auto mb-4 grid size-16 place-items-center rounded-full bg-[#c4ff4a] text-[#07111f]"><Trophy className="size-8" /></span><p className="text-sm font-bold uppercase tracking-[.18em] text-[#c4ff4a]">Séance terminée</p><h2 className="mt-1 text-5xl font-black">{points} points</h2><div className="mt-3 flex justify-center gap-2">{[1,2,3].map((n) => <Star key={n} className={`size-8 ${stars >= n ? "fill-amber-300 text-amber-300" : "text-white/15"}`} />)}</div><div className="mt-5 grid grid-cols-2 gap-2 sm:grid-cols-4"><Metric value={String(hits)} label="mouvements" /><Metric value={`${regularity}%`} label="régularité" /><Metric value={control ? `${control}%` : "—"} label="retour contrôlé" /><Metric value={`${Math.round(points / Math.max(1, hits))}`} label="pts / mouvement" /></div><div className="mt-4 rounded-2xl border border-sky-300/15 bg-sky-300/[.07] p-4 text-left"><p className="text-sm font-bold text-sky-200">Conseil pour la prochaine séance</p><p className="mt-1 text-sm leading-relaxed text-slate-200">{feedback}</p></div><div className="mt-4 rounded-2xl bg-white/5 p-5 text-left"><label className="block font-bold">Douleur après la séance : {pain}/10 <span className="font-normal text-slate-400">(avant : {painBefore}/10)</span></label><input aria-label="Douleur après la séance" className="mt-3 w-full accent-[#c4ff4a]" type="range" min="0" max="10" value={pain} onChange={(e) => setPain(Number(e.target.value))} />{pain - painBefore >= 2 && <p className="mt-2 rounded-xl bg-amber-300/10 p-3 text-sm text-amber-200">La douleur a augmenté. Arrêtez les exercices et parlez-en à votre professionnel de santé avant la prochaine séance.</p>}<label className="mt-5 block font-bold">Fatigue : {fatigue}/10</label><input aria-label="Fatigue ressentie" className="mt-3 w-full accent-sky-300" type="range" min="0" max="10" value={fatigue} onChange={(e) => setFatigue(Number(e.target.value))} /></div><p className="mt-4 text-xs leading-relaxed text-slate-500">Les scores sont des repères de jeu approximatifs, pas des mesures cliniques.</p><div className="mt-5 flex flex-col justify-center gap-3 sm:flex-row"><Button size="lg" disabled={saved} onClick={onSave} className="h-12 rounded-xl bg-[#c4ff4a] font-bold text-[#07111f] hover:bg-[#d5ff7d]"><Check /> {saved ? "Séance enregistrée" : "Enregistrer le bilan"}</Button><Button size="lg" variant="outline" onClick={onReset} className="h-12 rounded-xl border-white/15 bg-white/5 text-white hover:bg-white/10 hover:text-white"><RotateCcw /> Nouvelle séance</Button></div></div></div>;
 }
 
