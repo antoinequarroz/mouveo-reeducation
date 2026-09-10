@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Mouvéo — Mobilité guidée",
-  description: "Prototype de rééducation gamifiée de l’épaule guidée par la caméra.",
+  description: "Jeux de mobilité personnalisés pour les bras, les jambes et l’équilibre, guidés par la caméra.",
   manifest: "/manifest.webmanifest",
   appleWebApp: { capable: true, title: "Mouvéo", statusBarStyle: "black-translucent" },
   icons: {
