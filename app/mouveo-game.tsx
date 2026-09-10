@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Activity, Camera, Check, Hand, RotateCcw, Shield, Sparkles } from "lucide-react";
+import { Activity, Camera, Check, Hand, RotateCcw, Shield, Sparkles, Star, Trophy, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import type { NormalizedLandmark, PoseLandmarker as PoseLandmarkerType } from "@mediapipe/tasks-vision";
@@ -24,9 +24,14 @@ export default function MouveoGame() {
   const stageRef = useRef<Stage>("welcome");
   const targetIndexRef = useRef(0);
   const lastHitRef = useRef(0);
+  const comboRef = useRef(0);
   const [stage, setStage] = useState<Stage>("welcome");
   const [status, setStatus] = useState("Placez le téléphone face à vous");
   const [hits, setHits] = useState(0);
+  const [points, setPoints] = useState(0);
+  const [combo, setCombo] = useState(0);
+  const [bestScore, setBestScore] = useState(0);
+  const [celebration, setCelebration] = useState<string | null>(null);
   const [seconds, setSeconds] = useState(45);
   const [cameraError, setCameraError] = useState("");
   const [demo, setDemo] = useState(false);
@@ -39,6 +44,17 @@ export default function MouveoGame() {
   }, []);
 
   useEffect(() => () => stopCamera(), [stopCamera]);
+
+  useEffect(() => {
+    const saved = Number(window.localStorage.getItem("mouveo-best-score") || 0);
+    setBestScore(saved);
+  }, []);
+
+  useEffect(() => {
+    if (stage !== "finished" || points <= bestScore) return;
+    window.localStorage.setItem("mouveo-best-score", String(points));
+    setBestScore(points);
+  }, [stage, points, bestScore]);
 
   useEffect(() => {
     if (stage !== "playing") return;
@@ -55,6 +71,21 @@ export default function MouveoGame() {
     }, 1000);
     return () => window.clearInterval(timer);
   }, [stage, stopCamera]);
+
+  const recordHit = useCallback(() => {
+    const nextCombo = comboRef.current + 1;
+    comboRef.current = nextCombo;
+    targetIndexRef.current = (targetIndexRef.current + 1) % TARGETS.length;
+    setHits((value) => value + 1);
+    setCombo(nextCombo);
+    setPoints((value) => value + 10 + Math.floor(nextCombo / 3) * 5);
+    setStatus(nextCombo >= 3 ? `Série ×${nextCombo} — superbe régularité !` : "Bien joué ! Continuez lentement.");
+    if ([3, 5, 10].includes(nextCombo)) {
+      setCelebration(nextCombo === 3 ? "Série lancée !" : nextCombo === 5 ? "Mi-parcours !" : "Objectif atteint !");
+      window.setTimeout(() => setCelebration(null), 1300);
+    }
+    if (navigator.vibrate) navigator.vibrate(nextCombo % 5 === 0 ? [45, 40, 45] : 45);
+  }, []);
 
   const drawScene = useCallback((landmarks?: NormalizedLandmark[][]) => {
     const canvas = canvasRef.current;
@@ -111,13 +142,10 @@ export default function MouveoGame() {
       const distance = Math.hypot(x - tx, y - ty);
       if (stageRef.current === "playing" && distance < 58 && Date.now() - lastHitRef.current > 650) {
         lastHitRef.current = Date.now();
-        targetIndexRef.current = (targetIndexRef.current + 1) % TARGETS.length;
-        setHits((value) => value + 1);
-        setStatus("Bien joué ! Continuez lentement.");
-        if (navigator.vibrate) navigator.vibrate(45);
+        recordHit();
       }
     });
-  }, []);
+  }, [recordHit]);
 
   const loop = useCallback(() => {
     const video = videoRef.current;
@@ -162,27 +190,25 @@ export default function MouveoGame() {
   };
 
   const startGame = () => {
-    setHits(0); setSeconds(45); targetIndexRef.current = 0;
+    setHits(0); setPoints(0); setCombo(0); comboRef.current = 0; setSeconds(45); targetIndexRef.current = 0;
     setStatus("Touchez la cible avec une main");
     setStage("playing");
   };
 
   const startDemo = () => {
-    setDemo(true); setStage("playing"); setHits(0); setSeconds(45);
+    setDemo(true); setStage("playing"); setHits(0); setPoints(0); setCombo(0); comboRef.current = 0; setSeconds(45);
     setStatus("Mode démo — touchez les cibles à l’écran");
     requestAnimationFrame(function animate() { drawScene(); frameRef.current = requestAnimationFrame(animate); });
   };
 
   const reset = () => {
-    stopCamera(); setDemo(false); setStage("welcome"); setHits(0); setSeconds(45);
+    stopCamera(); setDemo(false); setStage("welcome"); setHits(0); setPoints(0); setCombo(0); comboRef.current = 0; setSeconds(45);
     setStatus("Placez le téléphone face à vous");
   };
 
   const demoHit = () => {
     if (!demo || stage !== "playing") return;
-    targetIndexRef.current = (targetIndexRef.current + 1) % TARGETS.length;
-    setHits((v) => v + 1);
-    setStatus("Bien joué ! Cible suivante.");
+    recordHit();
   };
 
   useEffect(() => {
@@ -200,7 +226,7 @@ export default function MouveoGame() {
         inputSchema: { type: "object", properties: {}, additionalProperties: false },
         annotations: { readOnlyHint: false, untrustedContentHint: false },
         execute() {
-          setDemo(true); setStage("playing"); setHits(0); setSeconds(45);
+          setDemo(true); setStage("playing"); setHits(0); setPoints(0); setCombo(0); comboRef.current = 0; setSeconds(45);
           targetIndexRef.current = 0;
           setStatus("Mode démo — touchez les cibles à l’écran");
           return { status: "started", duration_seconds: 45, exercise: "shoulder_mobility" };
@@ -252,14 +278,27 @@ export default function MouveoGame() {
 
           {stage === "playing" && (
             <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between bg-gradient-to-b from-black/70 to-transparent p-5 pb-16">
-              <div><p className="text-sm text-white/70">Cibles touchées</p><p className="text-4xl font-black">{hits}</p></div>
+              <div className="flex gap-3">
+                <div><p className="text-sm text-white/70">Score</p><p className="text-4xl font-black tabular-nums">{points}</p></div>
+                {combo >= 3 && <div className="mt-1 h-fit rounded-full border border-amber-300/30 bg-amber-300/15 px-3 py-1 text-sm font-black text-amber-200"><Zap className="mr-1 inline size-4 fill-current" /> ×{combo}</div>}
+              </div>
               <div className="rounded-2xl bg-black/35 px-5 py-3 text-center backdrop-blur"><p className="text-xs text-white/70">Temps</p><p className="text-2xl font-black tabular-nums">0:{String(seconds).padStart(2,"0")}</p></div>
+            </div>
+          )}
+
+          {celebration && stage === "playing" && (
+            <div className="pointer-events-none absolute inset-0 z-20 grid place-items-center overflow-hidden" aria-live="polite">
+              <div className="reward-pop rounded-3xl border border-[#c4ff4a]/40 bg-[#07111f]/85 px-7 py-5 text-center shadow-[0_0_60px_rgba(196,255,74,.28)] backdrop-blur-md">
+                <Star className="mx-auto mb-2 size-9 fill-[#c4ff4a] text-[#c4ff4a]" />
+                <p className="text-2xl font-black">{celebration}</p><p className="mt-1 text-sm font-bold text-[#c4ff4a]">+ bonus de série</p>
+              </div>
+              {Array.from({ length: 12 }).map((_, index) => <span key={index} className="spark" style={{ "--i": index } as React.CSSProperties} />)}
             </div>
           )}
 
           {stage === "finished" && (
             <div className="absolute inset-0 grid place-items-center bg-[#0b1a2b] p-6 text-center">
-              <div><span className="mx-auto mb-5 grid size-20 place-items-center rounded-full bg-[#c4ff4a] text-[#07111f]"><Check className="size-10" /></span><p className="text-sm font-bold uppercase tracking-[.18em] text-[#c4ff4a]">Séance terminée</p><h2 className="mt-2 text-5xl font-black">{hits} cibles</h2><p className="mt-3 text-slate-300">Bravo. Votre mouvement est resté régulier jusqu’au bout.</p><Button size="lg" onClick={reset} className="mt-7 h-13 rounded-2xl bg-white px-7 font-bold text-[#07111f] hover:bg-slate-100"><RotateCcw /> Recommencer</Button></div>
+              <div><span className="mx-auto mb-5 grid size-20 place-items-center rounded-full bg-[#c4ff4a] text-[#07111f]"><Trophy className="size-10" /></span><p className="text-sm font-bold uppercase tracking-[.18em] text-[#c4ff4a]">Séance terminée</p><h2 className="mt-2 text-5xl font-black">{points} points</h2><div className="mt-4 flex justify-center gap-2" aria-label={`${Math.min(3, hits >= 10 ? 3 : hits >= 6 ? 2 : hits >= 3 ? 1 : 0)} étoiles obtenues`}>{[3,6,10].map((goal) => <Star key={goal} className={`size-8 ${hits >= goal ? "fill-amber-300 text-amber-300" : "text-white/15"}`} />)}</div><p className="mt-3 text-slate-300">{hits} cibles touchées · meilleure série ×{combo}</p>{points >= bestScore && points > 0 && <p className="mt-2 font-bold text-amber-200">Nouveau record personnel !</p>}<Button size="lg" onClick={reset} className="mt-7 h-13 rounded-2xl bg-white px-7 font-bold text-[#07111f] hover:bg-slate-100"><RotateCcw /> Recommencer</Button></div>
             </div>
           )}
         </div>
@@ -268,8 +307,10 @@ export default function MouveoGame() {
           <div className="rounded-[1.6rem] border border-white/10 bg-white/[.055] p-5">
             <div className="flex items-center justify-between"><p className="font-bold">Séance du jour</p><span className="rounded-full bg-[#c4ff4a]/15 px-3 py-1 text-xs font-bold text-[#c4ff4a]">ÉPAULE</span></div>
             <h2 className="mt-5 text-2xl font-black">Bulles de mobilité</h2><p className="mt-2 text-sm leading-relaxed text-slate-400">Levez alternativement chaque bras et touchez les cibles à votre rythme.</p>
-            <div className="mt-6"><div className="mb-2 flex justify-between text-sm"><span className="text-slate-400">Progression</span><span className="font-bold">{Math.min(100, hits * 10)}%</span></div><Progress value={Math.min(100, hits * 10)} className="h-2 bg-white/10 [&_[data-slot=progress-indicator]]:bg-[#c4ff4a]" /></div>
+            <div className="mt-6"><div className="mb-2 flex justify-between text-sm"><span className="text-slate-400">Objectif : 10 cibles</span><span className="font-bold">{Math.min(10, hits)}/10</span></div><Progress value={Math.min(100, hits * 10)} className="h-2 bg-white/10 [&_[data-slot=progress-indicator]]:bg-[#c4ff4a]" /></div>
+            <div className="mt-5 grid grid-cols-3 gap-2 text-center"><div className="rounded-xl bg-white/5 p-2"><p className="text-lg font-black text-amber-200">{points}</p><p className="text-[11px] text-slate-400">points</p></div><div className="rounded-xl bg-white/5 p-2"><p className="text-lg font-black text-sky-200">×{combo}</p><p className="text-[11px] text-slate-400">série</p></div><div className="rounded-xl bg-white/5 p-2"><p className="text-lg font-black text-[#c4ff4a]">{bestScore}</p><p className="text-[11px] text-slate-400">record</p></div></div>
           </div>
+          <div className="rounded-[1.6rem] border border-amber-300/15 bg-amber-300/[.055] p-5"><div className="flex items-center gap-3"><span className="grid size-10 place-items-center rounded-xl bg-amber-300/15 text-amber-200"><Trophy className="size-5" /></span><div><p className="font-bold">Paliers de séance</p><p className="text-xs text-slate-400">Sans chronomètre de vitesse</p></div></div><div className="mt-4 flex items-center justify-between text-sm"><span className={hits >= 3 ? "text-amber-200" : "text-slate-400"}>3 · Découverte</span><span className={hits >= 6 ? "text-amber-200" : "text-slate-400"}>6 · Régulier</span><span className={hits >= 10 ? "text-amber-200" : "text-slate-400"}>10 · Étoile</span></div></div>
           <div className="rounded-[1.6rem] border border-sky-400/15 bg-sky-400/[.06] p-5"><p className="font-bold text-sky-200">Bougez sans douleur</p><p className="mt-2 text-sm leading-relaxed text-slate-300">Arrêtez immédiatement si un mouvement provoque une douleur, un vertige ou un inconfort inhabituel.</p><Button variant="outline" onClick={reset} className="mt-4 w-full rounded-xl border-red-300/20 bg-red-400/10 text-red-100 hover:bg-red-400/20 hover:text-white">Arrêter la séance</Button></div>
           <p className="px-2 text-xs leading-relaxed text-slate-500">Prototype de coaching, sans diagnostic ni mesure clinique. Suivez les consignes de votre professionnel de santé.</p>
         </aside>
