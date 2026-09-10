@@ -63,6 +63,16 @@ function streakScore(history: SessionRecord[]) {
   return streak;
 }
 
+function preferredFrenchVoice(voices: SpeechSynthesisVoice[]) {
+  return voices.find((item) => /ariane/i.test(item.name) && /^fr[-_]CH/i.test(item.lang))
+    ?? voices.find((item) => /ariane/i.test(item.name))
+    ?? voices.find((item) => /^fr[-_]CH/i.test(item.lang) && /female|natural|neural/i.test(item.name))
+    ?? voices.find((item) => /^fr[-_]CH/i.test(item.lang))
+    ?? voices.find((item) => /^fr[-_]FR/i.test(item.lang) && /female|natural|neural/i.test(item.name))
+    ?? voices.find((item) => /^fr/i.test(item.lang))
+    ?? null;
+}
+
 export default function MouveoGame() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -88,6 +98,7 @@ export default function MouveoGame() {
   const circuitIndexRef = useRef(0);
   const programPlanRef = useRef<ExerciseId[]>(DEFAULT_CIRCUIT);
   const visibleRef = useRef(true);
+  const selectedVoiceRef = useRef<SpeechSynthesisVoice | null>(null);
 
   const [view, setView] = useState<View>("patient");
   const [stage, setStage] = useState<Stage>("welcome");
@@ -102,6 +113,7 @@ export default function MouveoGame() {
   const [goal, setGoal] = useState(8);
   const [seated, setSeated] = useState(false);
   const [voice, setVoice] = useState(true);
+  const [voiceProfile, setVoiceProfile] = useState("Recherche de la voix française…");
   const settingsRef = useRef({ exercise, arm, amplitude, goal, seated, voice, sessionMode });
   settingsRef.current = { exercise, arm, amplitude, goal, seated: seated && !STANDING_ONLY.has(exercise), voice, sessionMode };
   stageRef.current = stage;
@@ -139,9 +151,15 @@ export default function MouveoGame() {
   const speak = useCallback((text: string) => {
     if (!settingsRef.current.voice || !("speechSynthesis" in window)) return;
     window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = "fr-FR";
-    utterance.rate = 1.02;
+    const spokenText = /[.!?]$/.test(text.trim()) ? text.trim() : `${text.trim()}.`;
+    const utterance = new SpeechSynthesisUtterance(spokenText);
+    const selectedVoice = selectedVoiceRef.current ?? preferredFrenchVoice(window.speechSynthesis.getVoices());
+    selectedVoiceRef.current = selectedVoice;
+    if (selectedVoice) utterance.voice = selectedVoice;
+    utterance.lang = selectedVoice?.lang || "fr-CH";
+    utterance.rate = .9;
+    utterance.pitch = 1.02;
+    utterance.volume = 1;
     window.speechSynthesis.speak(utterance);
   }, []);
 
@@ -154,6 +172,19 @@ export default function MouveoGame() {
   }, []);
 
   useEffect(() => () => stopCamera(), [stopCamera]);
+
+  useEffect(() => {
+    if (!("speechSynthesis" in window)) return;
+    const selectVoice = () => {
+      const voices = window.speechSynthesis.getVoices();
+      const selected = preferredFrenchVoice(voices);
+      selectedVoiceRef.current = selected;
+      setVoiceProfile(selected && /ariane/i.test(selected.name) ? "Ariane · français suisse" : selected ? `${selected.name} · secours français` : "Voix française de l’appareil");
+    };
+    selectVoice();
+    window.speechSynthesis.addEventListener("voiceschanged", selectVoice);
+    return () => window.speechSynthesis.removeEventListener("voiceschanged", selectVoice);
+  }, []);
 
   useEffect(() => {
     try {
@@ -275,7 +306,7 @@ export default function MouveoGame() {
     setStatus(mechanic === "rhythm" && timingScore >= 85 ? "Tempo parfait — revenez doucement" : mode === "both" ? "Portail ouvert — redescendez les deux mains" : mode === "arm" ? "Cible atteinte — revenez près de la hanche" : mode === "knee" ? "Genou levé — reposez le pied doucement" : mode === "ankle" ? "Cible atteinte — revenez au centre" : "Descente validée — redressez-vous doucement");
     const milestones = [Math.ceil(settingsRef.current.goal * .4), Math.ceil(settingsRef.current.goal * .7), settingsRef.current.goal];
     if (milestones.includes(nextCombo)) celebrate(nextCombo === milestones[0] ? "Série lancée !" : nextCombo === milestones[1] ? "Très régulier !" : "Mission accomplie !");
-    speak(nextCombo % 3 === 0 ? `Série de ${nextCombo}. Revenez doucement.` : "Bien. Revenez doucement.");
+    if (nextCombo % 3 === 0 || nextCombo === settingsRef.current.goal) speak(`Série de ${nextCombo}. Revenez doucement.`);
     if (navigator.vibrate) navigator.vibrate(nextCombo % 5 === 0 ? [45, 40, 45] : 45);
   }, [celebrate, speak, stopCamera]);
 
@@ -525,7 +556,7 @@ export default function MouveoGame() {
 
   return (
     <main className="min-h-dvh bg-[#07111f] text-white">
-      <Header onHistory={() => setView("history")} onTherapist={() => { setSessionMode("single"); setView("therapist"); }} voice={voice} onVoice={() => setVoice((v) => !v)} online={online} canInstall={Boolean(installPrompt)} onInstall={installApp} />
+      <Header onHistory={() => setView("history")} onTherapist={() => { setSessionMode("single"); setView("therapist"); }} voice={voice} voiceProfile={voiceProfile} onVoice={() => setVoice((v) => !v)} online={online} canInstall={Boolean(installPrompt)} onInstall={installApp} />
       <section className="mx-auto grid max-w-7xl gap-4 px-4 pb-6 sm:px-8 lg:grid-cols-[minmax(0,1fr)_340px]">
         <div className="camera-shell relative min-h-[64dvh] overflow-hidden rounded-[2rem] border border-white/10 bg-[#0d1b2d] shadow-2xl">
           <video ref={videoRef} muted playsInline className={`absolute inset-0 h-full w-full scale-x-[-1] object-cover transition-opacity ${stage === "welcome" || stage === "setup" || stage === "finished" ? "opacity-0" : "opacity-100"}`} />
@@ -557,8 +588,8 @@ export default function MouveoGame() {
   );
 }
 
-function Header({ onHistory, onTherapist, voice, onVoice, online, canInstall, onInstall }: { onHistory: () => void; onTherapist: () => void; voice: boolean; onVoice: () => void; online: boolean; canInstall: boolean; onInstall: () => void }) {
-  return <header className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-4 sm:px-8"><div className="flex items-center gap-3"><span className="grid size-10 place-items-center rounded-2xl bg-[#c4ff4a] text-[#07111f]"><Activity /></span><div><p className="text-lg font-black tracking-tight">MOUVÉO</p><p className="flex items-center gap-1.5 text-xs text-slate-400"><span className={`size-1.5 rounded-full ${online ? "bg-emerald-300" : "bg-amber-300"}`} />{online ? "Prêt" : "Mode hors ligne"}</p></div></div><nav className="flex items-center gap-1">{canInstall && <Button variant="outline" onClick={onInstall} className="hidden border-[#c4ff4a]/30 bg-[#c4ff4a]/10 text-[#c4ff4a] hover:bg-[#c4ff4a]/20 hover:text-[#c4ff4a] sm:inline-flex"><Sparkles /> Installer</Button>}<Button aria-label={voice ? "Désactiver la voix" : "Activer la voix"} variant="ghost" size="icon" onClick={onVoice} className="text-slate-300 hover:bg-white/10 hover:text-white">{voice ? <Volume2 /> : <VolumeX />}</Button><Button variant="ghost" onClick={onHistory} className="text-slate-300 hover:bg-white/10 hover:text-white"><History /> <span className="hidden sm:inline">Historique</span></Button><Button variant="ghost" onClick={onTherapist} className="text-slate-300 hover:bg-white/10 hover:text-white"><Settings2 /> <span className="hidden sm:inline">Thérapeute</span></Button></nav></header>;
+function Header({ onHistory, onTherapist, voice, voiceProfile, onVoice, online, canInstall, onInstall }: { onHistory: () => void; onTherapist: () => void; voice: boolean; voiceProfile: string; onVoice: () => void; online: boolean; canInstall: boolean; onInstall: () => void }) {
+  return <header className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-4 sm:px-8"><div className="flex items-center gap-3"><span className="grid size-10 place-items-center rounded-2xl bg-[#c4ff4a] text-[#07111f]"><Activity /></span><div><p className="text-lg font-black tracking-tight">MOUVÉO</p><p className="flex items-center gap-1.5 text-xs text-slate-400"><span className={`size-1.5 rounded-full ${online ? "bg-emerald-300" : "bg-amber-300"}`} />{online ? "Prêt" : "Mode hors ligne"}</p></div></div><nav className="flex items-center gap-1">{canInstall && <Button variant="outline" onClick={onInstall} className="hidden border-[#c4ff4a]/30 bg-[#c4ff4a]/10 text-[#c4ff4a] hover:bg-[#c4ff4a]/20 hover:text-[#c4ff4a] sm:inline-flex"><Sparkles /> Installer</Button>}<Button aria-label={voice ? `Désactiver ${voiceProfile}` : `Activer ${voiceProfile}`} title={voiceProfile} variant="ghost" onClick={onVoice} className="text-slate-300 hover:bg-white/10 hover:text-white">{voice ? <Volume2 /> : <VolumeX />}<span className="hidden text-xs font-bold md:inline">{/ariane/i.test(voiceProfile) ? "Ariane" : "Voix FR"}</span></Button><Button variant="ghost" onClick={onHistory} className="text-slate-300 hover:bg-white/10 hover:text-white"><History /> <span className="hidden sm:inline">Historique</span></Button><Button variant="ghost" onClick={onTherapist} className="text-slate-300 hover:bg-white/10 hover:text-white"><Settings2 /> <span className="hidden sm:inline">Thérapeute</span></Button></nav></header>;
 }
 
 function Welcome({ exercise, setExercise, sessionMode, setSessionMode, programPlan, world, setWorld, painBefore, setPainBefore, cameraError, onCamera, onDemo }: { exercise: ExerciseId; setExercise: (id: ExerciseId) => void; sessionMode: SessionMode; setSessionMode: (mode: SessionMode) => void; programPlan: ExerciseId[]; world: WorldId; setWorld: (world: WorldId) => void; painBefore: number; setPainBefore: (value: number) => void; cameraError: string; onCamera: () => void; onDemo: () => void }) {
