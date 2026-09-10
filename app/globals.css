@@ -102,6 +102,10 @@ body {
   overscroll-behavior: none;
 }
 
+main { padding-bottom: env(safe-area-inset-bottom); }
+
+input[type="range"] { min-height: 28px; }
+
 button { touch-action: manipulation; }
 
 .reward-pop { animation: reward-pop 1.3s ease both; }
