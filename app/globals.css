@@ -109,6 +109,7 @@ input[type="range"] { min-height: 28px; }
 button { touch-action: manipulation; }
 
 .reward-pop { animation: reward-pop 1.3s ease both; }
+.countdown-pop { animation: countdown-pop .72s cubic-bezier(.2,.9,.25,1) both; }
 .spark {
   --angle: calc(var(--i) * 30deg);
   position: absolute;
@@ -133,9 +134,14 @@ button { touch-action: manipulation; }
   22% { opacity: 1; }
   100% { opacity: 0; transform: rotate(var(--angle)) translateY(-170px) scale(1.2); }
 }
+@keyframes countdown-pop {
+  0% { opacity: 0; transform: scale(.45); }
+  35% { opacity: 1; transform: scale(1.08); }
+  100% { opacity: .25; transform: scale(.92); }
+}
 
 @media (prefers-reduced-motion: reduce) {
-  .reward-pop, .spark { animation: none; }
+  .reward-pop, .spark, .countdown-pop { animation: none; }
 }
 
 @media (max-width: 1023px) {
